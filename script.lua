@@ -14,7 +14,7 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local RunService = game:GetService("RunService")
 
 local PLACE_ID = 109983668079237
-local SCAN_DURATION = 0.5 -- Ultra-fast scanning
+local SCAN_DURATION = 3
 
 -- AUTO-RESTART CONFIG
 local AUTO_RESTART_ENABLED = true
@@ -658,7 +658,7 @@ local function sendDiscordWebhook()
 end
 
 -- ========================
--- OPTIMIZED SERVER HOPPING
+-- SERVER HOPPING
 -- ========================
 local function serverHop()
 	hasScannedCurrentServer = false
@@ -669,74 +669,70 @@ local function serverHop()
 		return
 	end
 	
-	-- Check if we have a cached server list
-	local currentTime = os.time()
-	if cachedServerList and (currentTime - serverListCacheTime) < SERVER_LIST_CACHE_DURATION then
-		-- Use cached server list
-		if #cachedServerList > 0 then
-			local randomIndex = math.random(1, #cachedServerList)
-			local targetServer = cachedServerList[randomIndex]
-			
-			task.wait(0.3)
-			pcall(function()
-				TeleportService:TeleportToPlaceInstance(PLACE_ID, targetServer.id, S.LocalPlayer)
-			end)
-			return
-		end
-	end
-	
-	-- Fetch new server list
 	local targetServer
-	local success, serversData = pcall(function()
-		return HttpService:JSONDecode(
-			game:HttpGet("https://games.roblox.com/v1/games/"..PLACE_ID.."/servers/Public?sortOrder=Asc&limit=100")
-		)
-	end)
+	local maxAttempts = 10
+	local attempts = 0
 	
-	if success and serversData and serversData.data then
-		local validServers = {}
+	repeat
+		attempts = attempts + 1
+		local success, serversData = pcall(function()
+			return HttpService:JSONDecode(
+				game:HttpGet("https://games.roblox.com/v1/games/"..PLACE_ID.."/servers/Public?sortOrder=Asc&limit=100")
+			)
+		end)
 		
-		for _, server in ipairs(serversData.data) do
-			if server and server.id ~= game.JobId and server.playing < server.maxPlayers then
-				local fillPercentage = server.playing / server.maxPlayers
-				local score = 0
-				
-				if fillPercentage >= 0.5 and fillPercentage <= 0.85 then
-					score = server.playing * 2
-				elseif fillPercentage > 0.85 then
-					score = server.playing * 1.2
-				else
-					score = server.playing
+		if success and serversData and serversData.data then
+			local validServers = {}
+			
+			for _, server in ipairs(serversData.data) do
+				if server and server.id ~= game.JobId and server.playing < server.maxPlayers then
+					local fillPercentage = server.playing / server.maxPlayers
+					local availableSlots = server.maxPlayers - server.playing
+					local score = 0
+					
+					-- Prioritize servers with good player count BUT enough room to join
+					-- Avoid servers that are too full (>75%) as they fill up quickly
+					if fillPercentage >= 0.4 and fillPercentage <= 0.75 and availableSlots >= 2 then
+						-- Sweet spot: 40-75% full with at least 2 slots available
+						score = server.playing * 3 + availableSlots * 10
+					elseif fillPercentage > 0.75 and availableSlots >= 2 then
+						-- Pretty full but has slots - lower priority
+						score = server.playing * 1.5 + availableSlots * 5
+					elseif fillPercentage < 0.4 and availableSlots >= 3 then
+						-- Less populated but plenty of room - medium priority
+						score = server.playing * 2 + availableSlots * 8
+					else
+						-- Any other server with at least 1 slot
+						score = availableSlots * 5
+					end
+					
+					table.insert(validServers, {
+						server = server,
+						score = score,
+						availableSlots = availableSlots
+					})
 				end
-				
-				table.insert(validServers, {
-					server = server,
-					score = score
-				})
+			end
+			
+			table.sort(validServers, function(a, b)
+				return a.score > b.score
+			end)
+			
+			if #validServers > 0 then
+				local topServers = math.min(10, #validServers)
+				local randomIndex = math.random(1, topServers)
+				targetServer = validServers[randomIndex].server
 			end
 		end
 		
-		table.sort(validServers, function(a, b)
-			return a.score > b.score
-		end)
-		
-		-- Cache the server list
-		cachedServerList = {}
-		for i = 1, math.min(20, #validServers) do
-			table.insert(cachedServerList, validServers[i].server)
+		if not targetServer then
+			task.wait(0.5)
 		end
-		serverListCacheTime = currentTime
-		
-		if #validServers > 0 then
-			local topServers = math.min(10, #validServers)
-			local randomIndex = math.random(1, topServers)
-			targetServer = validServers[randomIndex].server
-		end
-	end
+	until targetServer or attempts >= maxAttempts
 	
 	if targetServer then
-		task.wait(0.3)
-		pcall(function()
+		task.wait(0.5)
+		local teleportSuccess, teleportError = pcall(function()
 			TeleportService:TeleportToPlaceInstance(PLACE_ID, targetServer.id, S.LocalPlayer)
 		end)
 	end
@@ -797,9 +793,9 @@ task.spawn(function()
 				task.spawn(broadcastServerDataToAPI)
 			end
 			
-			-- Hop immediately after scanning
+			task.wait(SCAN_DURATION)
 			serverHop()
-			task.wait(1) -- Brief wait for teleport to process
+			task.wait(5)
 		end)
 		
 		if not success then
