@@ -21,7 +21,7 @@ local consecutiveErrors = 0
 -- ========================
 -- API CONFIGURATION
 -- ========================
-local API_BASE_URL = "https://reapersaj.manus.space"
+local API_BASE_URL = "https://reapershubaj.manus.space"
 local API_SERVERS_ENDPOINT = API_BASE_URL .. "/api/data"
 
 -- ========================
