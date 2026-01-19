@@ -1,8 +1,9 @@
--- REAPER LOGGER BOT v7.1 - OPTIMIZED FOR SPEED (RESTORED FULL VERSION)
+-- REAPER LOGGER BOT v7.1 - OPTIMIZED FOR SPEED (FIXED VERSION)
 -- ========================
 -- EXECUTION GUARD
 -- ========================
 if _G.REAPER_BOT_RUNNING then
+	print("[DEBUG] Bot already running, stopping execution.")
 	return
 end
 _G.REAPER_BOT_RUNNING = true
@@ -81,8 +82,12 @@ local AVATAR_URL = "https://cdn.discordapp.com/attachments/1449158166289059982/1
 -- ========================
 local webhookQueue = {}
 local lastWebhookTime = 0
-local dynamicCooldown = 0.1 -- Start with minimal cooldown
+local dynamicCooldown = 0.1
 local rateLimitRemaining = nil
+
+local function getRequest()
+	return (syn and syn.request) or http_request or request
+end
 
 local function queueWebhook(url, data, priority)
 	priority = priority or 5
@@ -95,33 +100,23 @@ local function queueWebhook(url, data, priority)
 	})
 end
 
--- OPTIMIZED: Process multiple webhooks in parallel batches
 local function processWebhookQueue()
 	while true do
 		if #webhookQueue > 0 then
 			local currentTime = os.time()
-			
-			-- Sort by priority
-			table.sort(webhookQueue, function(a, b)
-				return a.priority > b.priority
-			end)
+			table.sort(webhookQueue, function(a, b) return a.priority > b.priority end)
 			
 			if (currentTime - lastWebhookTime) >= dynamicCooldown then
-				-- OPTIMIZATION: Process up to 3 webhooks at once
 				local batchSize = math.min(3, #webhookQueue)
 				local batch = {}
+				for i = 1, batchSize do table.insert(batch, table.remove(webhookQueue, 1)) end
 				
-				for i = 1, batchSize do
-					table.insert(batch, table.remove(webhookQueue, 1))
-				end
-				
-				-- Send all webhooks in batch simultaneously
 				for _, webhook in ipairs(batch) do
 					task.spawn(function()
-						local request = (syn and syn.request) or http_request or request
-						if request then
+						local req = getRequest()
+						if req then
 							local success, response = pcall(function()
-								return request({
+								return req({
 									Url = webhook.url,
 									Method = "POST",
 									Headers = {["Content-Type"] = "application/json"},
@@ -130,19 +125,13 @@ local function processWebhookQueue()
 							end)
 							
 							if success and response then
-								-- Parse rate limit headers
 								if response.Headers then
 									local remaining = response.Headers["x-ratelimit-remaining"] or response.Headers["X-RateLimit-Remaining"]
 									if remaining then
 										rateLimitRemaining = tonumber(remaining)
-										-- Adjust cooldown based on remaining requests
-										if rateLimitRemaining and rateLimitRemaining > 10 then
-											dynamicCooldown = 0.05 -- Very fast
-										elseif rateLimitRemaining and rateLimitRemaining > 5 then
-											dynamicCooldown = 0.1 -- Fast
-										else
-											dynamicCooldown = 0.3 -- Slow down
-										end
+										if rateLimitRemaining and rateLimitRemaining > 10 then dynamicCooldown = 0.05
+										elseif rateLimitRemaining and rateLimitRemaining > 5 then dynamicCooldown = 0.1
+										else dynamicCooldown = 0.3 end
 									end
 								end
 							elseif not success and webhook.retries < 2 then
@@ -152,25 +141,16 @@ local function processWebhookQueue()
 						end
 					end)
 				end
-				
 				lastWebhookTime = currentTime
 			end
 		end
-		task.wait(0.05) -- Reduced from 0.1 to 0.05 for faster processing
+		task.wait(0.05)
 	end
 end
-
 task.spawn(processWebhookQueue)
 
 -- ========================
--- GLOBAL REGISTRIES
--- ========================
-if not _G.REAPER_BOT_REGISTRY then
-	_G.REAPER_BOT_REGISTRY = {}
-end
-
--- ========================
--- SERVICES
+-- SERVICES & SESSION
 -- ========================
 local S = {
 	Players = Players,
@@ -178,175 +158,61 @@ local S = {
 	LocalPlayer = Players.LocalPlayer,
 }
 
--- ========================
--- SESSION DATA
--- ========================
 local SESSION_DATA = {
 	botId = nil,
 	username = nil,
 	userId = nil,
-	displayName = nil,
 	executionCount = 0,
 	sessionStartTime = os.time(),
-	currentRunStartTime = os.time(),
-	serversScanned = 0,
-	brainrotsLogged = {
-		["1B+"] = 0, ["300M+"] = 0, ["100M+"] = 0,
-		["50M+"] = 0, ["10-50M"] = 0, ["1-10M"] = 0
-	},
-	loggedBrainrots = {},
 }
 
--- ========================
--- SCAN STATE
--- ========================
-local allAnimalsCache = {}
-local lastScanTime = 0
-local SCAN_COOLDOWN = 1 -- Reduced from 3 to 1 second
-local isScanning = false
-local hasScannedCurrentServer = false
-local scannedServers = {}
-local webhooksSentForServer = {}
-
--- OPTIMIZATION: Cache server list to avoid repeated HTTP requests
-local cachedServerList = nil
-local serverListCacheTime = 0
-local SERVER_LIST_CACHE_DURATION = 30 -- Cache for 30 seconds
-
--- ========================
--- UTILITY FUNCTIONS
--- ========================
-local function formatUptime(seconds)
-	local hours = math.floor(seconds / 3600)
-	local minutes = math.floor((seconds % 3600) / 60)
-	local secs = seconds % 60
-	return string.format("%02d:%02d:%02d", hours, minutes, secs)
-end
-
 local function formatMoney(value)
-	if S.NumberUtils then
-		local success, result = pcall(function()
-			return "$" .. S.NumberUtils:ToString(value) .. "/s"
-		end)
-		if success then return result end
-	end
-	
-	if value >= 1000000000 then
-		return string.format("$%.2fB/s", value / 1000000000)
-	elseif value >= 1000000 then
-		return string.format("$%.2fM/s", value / 1000000)
-	elseif value >= 1000 then
-		return string.format("$%.2fK/s", value / 1000)
-	else
-		return string.format("$%.0f/s", value)
-	end
-end
-
-local function generateBotId(username, userId)
-	return "BOT_" .. username .. "#" .. tostring(userId)
-end
-
-local function color3ToDecimal(color3)
-	local r = math.floor(color3.R * 255)
-	local g = math.floor(color3.G * 255)
-	local b = math.floor(color3.B * 255)
-	return r * 65536 + g * 256 + b
+	if value >= 1000000000 then return string.format("$%.2fB/s", value / 1000000000)
+	elseif value >= 1000000 then return string.format("$%.2fM/s", value / 1000000)
+	elseif value >= 1000 then return string.format("$%.2fK/s", value / 1000)
+	else return string.format("$%.0f/s", value) end
 end
 
 local function getWebhookTier(highestValue, webhookSet)
 	webhookSet = webhookSet or WEBHOOKS
 	for _, tier in ipairs(webhookSet) do
-		if highestValue >= tier.threshold then
-			return tier, false
-		end
+		if highestValue >= tier.threshold then return tier, false end
 	end
 	return FALLBACK_WEBHOOK, true
 end
 
 -- ========================
--- SESSION INITIALIZATION
+-- SCANNING LOGIC
 -- ========================
-local function initializeSession()
-	local player = S.LocalPlayer
-	SESSION_DATA.username = player.Name
-	SESSION_DATA.userId = player.UserId
-	SESSION_DATA.displayName = player.DisplayName
-	SESSION_DATA.botId = generateBotId(player.Name, player.UserId)
-	
-	if _G.REAPER_BOT_REGISTRY[SESSION_DATA.botId] then
-		SESSION_DATA.executionCount = _G.REAPER_BOT_REGISTRY[SESSION_DATA.botId].executionCount + 1
-	else
-		SESSION_DATA.executionCount = 1
-	end
-	
-	_G.REAPER_BOT_REGISTRY[SESSION_DATA.botId] = {
-		executionCount = SESSION_DATA.executionCount,
-		lastActive = os.time(),
-		serversScanned = 0
-	}
-end
+local allAnimalsCache = {}
+local lastScanTime = 0
+local SCAN_COOLDOWN = 1
+local isScanning = false
+local hasScannedCurrentServer = false
+local scannedServers = {}
+local webhooksSentForServer = {}
 
--- ========================
--- GAME MODULE LOADING
--- ========================
-local Packages = ReplicatedStorage:WaitForChild("Packages", 10)
-local Datas = ReplicatedStorage:WaitForChild("Datas", 10)
-local Shared = ReplicatedStorage:WaitForChild("Shared", 10)
-local Utils = ReplicatedStorage:WaitForChild("Utils", 10)
-
-if Packages and Datas and Shared and Utils then
-	S.Synchronizer = require(Packages:WaitForChild("Synchronizer", 5))
-	S.AnimalsData = require(Datas:WaitForChild("Animals", 5))
-	S.RaritiesData = require(Datas:WaitForChild("Rarities", 5))
-	S.AnimalsShared = require(Shared:WaitForChild("Animals", 5))
-	S.NumberUtils = require(Utils:WaitForChild("NumberUtils", 5))
-end
-
--- ========================
--- OPTIMIZED BRAINROT SCANNING
--- ========================
 local function scanServerBrainrots()
 	local currentJobId = game.JobId
-	
-	if scannedServers[currentJobId] then
-		hasScannedCurrentServer = true
-		return allAnimalsCache
-	end
-	
-	if isScanning or (os.time() - lastScanTime < SCAN_COOLDOWN) then
-		return allAnimalsCache
-	end
-	
-	if hasScannedCurrentServer then
-		return allAnimalsCache
-	end
+	if scannedServers[currentJobId] or isScanning or (os.time() - lastScanTime < SCAN_COOLDOWN) then return allAnimalsCache end
 	
 	isScanning = true
 	allAnimalsCache = {}
 	
 	local plots = workspace:FindFirstChild("Plots")
-	if not plots then
-		isScanning = false
-		return {}
-	end
-	
-	-- OPTIMIZATION: Use parallel processing for plot scanning
-	for _, plot in ipairs(plots:GetChildren()) do
-		local owner = plot:GetAttribute("Owner")
-		if owner then
+	if plots then
+		for _, plot in ipairs(plots:GetChildren()) do
+			local owner = plot:GetAttribute("Owner")
 			local animals = plot:FindFirstChild("Animals")
-			if animals then
+			if owner and animals then
 				for _, animal in ipairs(animals:GetChildren()) do
 					local animalId = animal:GetAttribute("AnimalId")
-					local animalData = S.AnimalsData[animalId]
+					local animalData = S.AnimalsData and S.AnimalsData[animalId]
 					if animalData then
-						local rarityData = S.RaritiesData[animalData.Rarity]
 						local genValue = S.AnimalsShared.GetGenValue(animal)
 						
-						-- Extract Traits and Mutations
 						local traits = animal:GetAttribute("Traits") or {}
 						local mutation = animal:GetAttribute("Mutation")
-						
 						local traitList = {}
 						if mutation and mutation ~= "" then table.insert(traitList, mutation) end
 						if type(traits) == "table" then
@@ -354,7 +220,6 @@ local function scanServerBrainrots()
 						elseif type(traits) == "string" and traits ~= "" then
 							table.insert(traitList, traits)
 						end
-						
 						local traitString = #traitList > 0 and " (" .. table.concat(traitList, ", ") .. ")" or ""
 						
 						table.insert(allAnimalsCache, {
@@ -362,8 +227,6 @@ local function scanServerBrainrots()
 							fullName = animalData.Name .. traitString,
 							genValue = genValue,
 							genText = formatMoney(genValue),
-							rarity = animalData.Rarity,
-							rarityColor = rarityData.Color,
 							owner = owner,
 							plot = plot.Name
 						})
@@ -373,49 +236,31 @@ local function scanServerBrainrots()
 		end
 	end
 	
-	table.sort(allAnimalsCache, function(a, b)
-		return a.genValue > b.genValue
-	end)
-	
+	table.sort(allAnimalsCache, function(a, b) return a.genValue > b.genValue end)
 	lastScanTime = os.time()
 	isScanning = false
 	hasScannedCurrentServer = true
 	scannedServers[currentJobId] = true
 	
-	-- API BROADCAST (RESTORED)
+	-- API Broadcast
 	local topBrainrots = {}
 	for i = 1, math.min(5, #allAnimalsCache) do
 		local animal = allAnimalsCache[i]
-		table.insert(topBrainrots, {
-			name = animal.name,
-			value = animal.genValue,
-			owner = animal.owner,
-			mutation = animal.mutation,
-			traits = animal.traits
-		})
+		table.insert(topBrainrots, {name = animal.name, value = animal.genValue, owner = animal.owner})
 	end
-	
-	local totalValue = 0
-	for _, animal in ipairs(allAnimalsCache) do
-		totalValue = totalValue + animal.genValue
-	end
-	
 	local payload = {
 		jobId = game.JobId,
 		placeId = PLACE_ID,
 		topBrainrots = topBrainrots,
-		totalValue = totalValue,
-		brainrotCount = #allAnimalsCache,
 		scannedBy = SESSION_DATA.botId,
 		timestamp = os.time() * 1000,
 		playerCount = #Players:GetPlayers()
 	}
-	
 	task.spawn(function()
-		local request = (syn and syn.request) or http_request or request
-		if request then
+		local req = getRequest()
+		if req then
 			pcall(function()
-				request({
+				req({
 					Url = API_SERVERS_ENDPOINT,
 					Method = "POST",
 					Headers = {["Content-Type"] = "application/json"},
@@ -429,92 +274,35 @@ local function scanServerBrainrots()
 end
 
 -- ========================
--- DISCORD WEBHOOK
+-- WEBHOOK DISPATCH
 -- ========================
 local function sendDiscordWebhook()
 	local currentJobId = game.JobId
-	
-	if webhooksSentForServer[currentJobId] and webhooksSentForServer[currentJobId].discord then
-		return false
-	end
-	
-	if #allAnimalsCache == 0 then
-		return false
-	end
+	if webhooksSentForServer[currentJobId] or #allAnimalsCache == 0 then return end
 	
 	local topBrainrot = allAnimalsCache[1]
 	local highestValue = topBrainrot.genValue
+	if highestValue < MIN_THRESHOLD then return end
 	
-	if highestValue < MIN_THRESHOLD then
-		return false
-	end
-	
-	local tier, isFallback = getWebhookTier(highestValue, WEBHOOKS)
-	local crabbyTier, isCrabbyFallback = getWebhookTier(highestValue, CRABBY_PATTY_WEBHOOKS)
+	local tier = getWebhookTier(highestValue, WEBHOOKS)
+	local crabbyTier = getWebhookTier(highestValue, CRABBY_PATTY_WEBHOOKS)
 	
 	local playerCount = #Players:GetPlayers()
 	local maxPlayers = Players.MaxPlayers or 8
 	
 	local othersText = ""
-	for i = 1, math.min(20, #allAnimalsCache) do
+	for i = 1, math.min(15, #allAnimalsCache) do
 		local animal = allAnimalsCache[i]
 		if animal.genValue >= 5000000 then
 			othersText = othersText .. string.format("%s: %s\n", animal.fullName, animal.genText)
 		end
 	end
 	
-	if othersText == "" then
-		othersText = "No brainrots above 5M"
-	end
+	local joinScript = string.format('game:GetService("TeleportService"):TeleportToPlaceInstance(%d, "%s", game.Players.LocalPlayer)', PLACE_ID, game.JobId)
+	local instantJoinLink = string.format("https://www.roblox.com/games/start?placeId=%d&launchData=%s", PLACE_ID, game.JobId)
 	
-	local joinScript = string.format(
-		'game:GetService("TeleportService"):TeleportToPlaceInstance(%d, "%s", game.Players.LocalPlayer)',
-		PLACE_ID,
-		game.JobId
-	)
-	
-	local instantJoinLink = string.format(
-		"https://www.roblox.com/games/start?placeId=%d&launchData=%s",
-		PLACE_ID,
-		game.JobId
-	)
-	
-	local contentText = ""
-	local isSpecialBrainrot = false
-	if highestValue >= 50000000 then
-		contentText = "@everyone @here"
-	elseif highestValue >= 10000000 and highestValue < 50000000 then
-		for _, specialName in ipairs(SPECIAL_PING_BRAINROTS) do
-			if topBrainrot.name:lower():find(specialName:lower()) then
-				contentText = "@everyone @here"
-				isSpecialBrainrot = true
-				break
-			end
-		end
-	end
-	
+	local contentText = (highestValue >= 50000000) and "@everyone @here" or ""
 	local timestamp = os.date("!%Y-%m-%dT%H:%M:%SZ")
-	
-	-- Send special brainrots to highlights webhook
-	if isSpecialBrainrot then
-		local highlightEmbed = {
-			username = "Reaper Notifier",
-			avatar_url = AVATAR_URL,
-			embeds = {{
-				title = "Reaper Notifier | Special Brainrot",
-				color = 0xFFFFFF,
-				timestamp = timestamp,
-				fields = {
-					{name = "Name", value = topBrainrot.fullName, inline = true},
-					{name = "Money/sec", value = topBrainrot.genText, inline = true},
-					{name = "Players", value = string.format("%d/%d", playerCount, maxPlayers), inline = true},
-					{name = "Others (5M+)", value = "```\n" .. othersText .. "```", inline = false}
-				},
-				footer = {text = string.format("Bot %s scanning • Reaper Notifier • %s", SESSION_DATA.botId, os.date("%B %d, %Y at %I:%M %p"))}
-			}}
-		}
-		queueWebhook(HIGHLIGHTS_WEBHOOK, highlightEmbed, 9)
-	end
 	
 	local function createEmbed(titleName, color)
 		return {
@@ -527,202 +315,74 @@ local function sendDiscordWebhook()
 					{["name"] = "Name", ["value"] = topBrainrot.fullName, ["inline"] = true},
 					{["name"] = "Money/sec", ["value"] = topBrainrot.genText, ["inline"] = true},
 					{["name"] = "Players", ["value"] = string.format("%d/%d", playerCount, maxPlayers), ["inline"] = true},
-					{["name"] = "Top Brainrot", ["value"] = string.format("%s (%s)", topBrainrot.fullName, topBrainrot.genText), ["inline"] = false},
 					{["name"] = "Job ID", ["value"] = game.JobId, ["inline"] = false},
-					{["name"] = "Instant Join Server", ["value"] = string.format("[Join Server](%s)", instantJoinLink), ["inline"] = false},
+					{["name"] = "Instant Join", ["value"] = string.format("[Join Server](%s)", instantJoinLink), ["inline"] = false},
 					{["name"] = "Join Script", ["value"] = "```lua\n" .. joinScript .. "\n```", ["inline"] = false},
-					{["name"] = "Others (5M+)", ["value"] = "```\n" .. othersText .. "```", ["inline"] = false}
+					{["name"] = "Others (5M+)", ["value"] = "```\n" .. (othersText ~= "" and othersText or "None") .. "```", ["inline"] = false}
 				},
-				["footer"] = {
-					["text"] = string.format("Scanned by %s • Execution #%d • %s", SESSION_DATA.botId, SESSION_DATA.executionCount, os.date("%B %d, %Y at %I:%M %p"))
-				}
+				["footer"] = {["text"] = string.format("Scanned by %s • %s", SESSION_DATA.botId, os.date("%I:%M %p"))}
 			}},
 			["username"] = "Reaper Notifier",
 			["avatar_url"] = AVATAR_URL
 		}
 	end
 	
-	-- Send to Reaper set
 	queueWebhook(tier.url, createEmbed(tier.name, 0xFFFFFF), 8)
-	
-	-- Send to Crabby Patty set (Yellow)
 	queueWebhook(crabbyTier.url, createEmbed("Crabby Patty | " .. crabbyTier.name, 0xFFFF00), 8)
 	
-	-- Secondary 1-10M webhook
 	if highestValue >= 1000000 and highestValue <= 10000000 then
-		queueWebhook(SECONDARY_1_10M_WEBHOOK, createEmbed(tier.name, 0xFFFFFF), 5)
+		queueWebhook(SECONDARY_1_10M_WEBHOOK, createEmbed("1-10M", 0xFFFFFF), 5)
 	end
 	
-	if not webhooksSentForServer[currentJobId] then
-		webhooksSentForServer[currentJobId] = {}
-	end
-	webhooksSentForServer[currentJobId].discord = true
-	
-	return true
+	webhooksSentForServer[currentJobId] = true
+	print("[DEBUG] Webhooks queued for server: " .. currentJobId)
 end
 
 -- ========================
 -- SERVER HOPPING
 -- ========================
 local function serverHop()
-	hasScannedCurrentServer = false
-	allAnimalsCache = {}
-	
-	local request = (syn and syn.request) or http_request or request
-	if not request then
-		return
-	end
-	
-	local targetServer
-	local maxAttempts = 10
-	local attempts = 0
-	
-	repeat
-		attempts = attempts + 1
-		local success, serversData = pcall(function()
-			return HttpService:JSONDecode(
-				game:HttpGet("https://games.roblox.com/v1/games/"..PLACE_ID.."/servers/Public?sortOrder=Asc&limit=100")
-			)
-		end)
-		
-		if success and serversData and serversData.data then
-			local validServers = {}
-			
-			for _, server in ipairs(serversData.data) do
-				if server and server.id ~= game.JobId and server.playing < server.maxPlayers then
-					local fillPercentage = server.playing / server.maxPlayers
-					local availableSlots = server.maxPlayers - server.playing
-					local score = 0
-					
-					if fillPercentage >= 0.4 and fillPercentage <= 0.75 and availableSlots >= 2 then
-						score = server.playing * 3 + availableSlots * 10
-					elseif fillPercentage > 0.75 and availableSlots >= 2 then
-						score = server.playing * 1.5 + availableSlots * 5
-					elseif fillPercentage < 0.4 and availableSlots >= 3 then
-						score = server.playing * 2 + availableSlots * 8
-					else
-						score = availableSlots * 5
-					end
-					
-					table.insert(validServers, {
-						server = server,
-						score = score,
-						availableSlots = availableSlots
-					})
-				end
-			end
-			
-			table.sort(validServers, function(a, b)
-				return a.score > b.score
-			end)
-			
-			if #validServers > 0 then
-				local topServers = math.min(10, #validServers)
-				local randomIndex = math.random(1, topServers)
-				targetServer = validServers[randomIndex].server
-			end
-		end
-		
-		if not targetServer then
-			task.wait(0.5)
-		end
-	until targetServer or attempts >= maxAttempts
-	
-	if targetServer then
-		task.wait(0.5)
-		local teleportSuccess, teleportError = pcall(function()
-			TeleportService:TeleportToPlaceInstance(PLACE_ID, targetServer.id, S.LocalPlayer)
-		end)
-	end
-end
-
--- ========================
--- STARTUP NOTIFICATION
--- ========================
-local function sendStartupNotification()
-	local request = (syn and syn.request) or http_request or request
-	if not request then return end
-	
-	pcall(function()
-		local profileUrl = "https://www.roblox.com/users/" .. S.LocalPlayer.UserId .. "/profile"
-		local startupData = HttpService:JSONEncode({
-			["content"] = string.format(
-				"🚀 **Reaper Logger v7.1 OPTIMIZED Started**\n\n" ..
-				"**Bot ID:** `%s`\n" ..
-				"**Username:** [%s](%s)\n" ..
-				"**Execution #:** %d\n" ..
-				"**API Endpoint:** %s\n" ..
-				"**Optimizations:** Parallel scanning, batch webhooks, cached server list",
-				SESSION_DATA.botId,
-				S.LocalPlayer.Name,
-				profileUrl,
-				SESSION_DATA.executionCount,
-				API_SERVERS_ENDPOINT
-			),
-			["username"] = "Reaper Logger v7.1 OPTIMIZED",
-			["avatar_url"] = AVATAR_URL
-		})
-		request({
-			Url = STATUS_WEBHOOK,
-			Method = "POST",
-			Headers = {["Content-Type"] = "application/json"},
-			Body = startupData
-		})
+	local success, serversData = pcall(function()
+		return HttpService:JSONDecode(game:HttpGet("https://games.roblox.com/v1/games/"..PLACE_ID.."/servers/Public?sortOrder=Asc&limit=100"))
 	end)
+	
+	if success and serversData and serversData.data then
+		for _, server in ipairs(serversData.data) do
+			if server.id ~= game.JobId and server.playing < server.maxPlayers then
+				print("[DEBUG] Hopping to server: " .. server.id)
+				TeleportService:TeleportToPlaceInstance(PLACE_ID, server.id, S.LocalPlayer)
+				break
+			end
+		end
+	end
 end
 
 -- ========================
 -- MAIN LOOP
 -- ========================
-initializeSession()
-sendStartupNotification()
+SESSION_DATA.botId = "BOT_" .. S.LocalPlayer.Name
+SESSION_DATA.username = S.LocalPlayer.Name
+
+local Packages = ReplicatedStorage:WaitForChild("Packages", 10)
+local Datas = ReplicatedStorage:WaitForChild("Datas", 10)
+local Shared = ReplicatedStorage:WaitForChild("Shared", 10)
+
+if Packages and Datas and Shared then
+	S.AnimalsData = require(Datas:WaitForChild("Animals", 5))
+	S.AnimalsShared = require(Shared:WaitForChild("Animals", 5))
+end
 
 task.spawn(function()
-	task.wait(3)
-	
+	print("[DEBUG] Logger started.")
 	while true do
-		local success, err = pcall(function()
+		pcall(function()
 			scanServerBrainrots()
-			
 			if hasScannedCurrentServer and #allAnimalsCache > 0 then
-				task.spawn(sendDiscordWebhook)
+				sendDiscordWebhook()
 			end
-			
 			task.wait(SCAN_DURATION)
 			serverHop()
 			task.wait(5)
 		end)
-		
-		if not success then
-			consecutiveErrors = consecutiveErrors + 1
-			
-			if AUTO_RESTART_ENABLED and consecutiveErrors >= RESTART_ON_ERROR_COUNT then
-				pcall(function()
-					local request = (syn and syn.request) or http_request or request
-					if request then
-						request({
-							Url = STATUS_WEBHOOK,
-							Method = "POST",
-							Headers = {["Content-Type"] = "application/json"},
-							Body = HttpService:JSONEncode({
-								["content"] = string.format("🔄 **Bot Restarting** - %s\n**Reason:** %d consecutive errors\n**Uptime:** %s", SESSION_DATA.botId, consecutiveErrors, formatUptime(os.time() - SESSION_DATA.sessionStartTime)),
-								["username"] = "Reaper Notifier",
-								["avatar_url"] = AVATAR_URL
-							})
-						})
-					end
-				end)
-				task.wait(2)
-				_G.REAPER_BOT_RUNNING = false
-				task.wait(1)
-				-- loadstring(game:HttpGet("YOUR_SCRIPT_URL_HERE"))()
-				break
-			end
-			
-			hasScannedCurrentServer = false
-			task.wait(5)
-		else
-			consecutiveErrors = 0
-		end
 	end
 end)
