@@ -49,6 +49,7 @@ local CRABBY_PATTY_WEBHOOKS = {
 }
 
 local CRABBY_PATTY_AVATAR_URL = "https://cdn.discordapp.com/attachments/1449158166289059982/1449233510589005975/reaper.png"
+local CRABBY_PATTY_HIGHLIGHTS_WEBHOOK = "https://discord.com/api/webhooks/1462905013822292090/qS2gqifkKufFXhaYgfL8Iy04VMK52OA4iKolenHpHN4MgT3gju0Dfu4V97G8dXscZdnh"
 
 local FALLBACK_WEBHOOK = {
 	url = "https://discord.com/api/webhooks/1449180921592025245/cwF8NKXB05G8lzJt1ombgvTGdA2SxzdQfDOId-9S_IgF7c26QwgbxRdrQamwwy5VZrqK",
@@ -498,6 +499,63 @@ local function sendHighlightsEmbed()
 end
 
 -- ========================
+-- CRABBY PATTY HIGHLIGHTS EMBED (50M+)
+-- ========================
+local function sendCrabbyPattyHighlightsEmbed()
+	local currentJobId = game.JobId
+	
+	if webhooksSentForServer[currentJobId] and webhooksSentForServer[currentJobId].crabbyPattyHighlights then
+		return
+	end
+	
+	if #allAnimalsCache == 0 or allAnimalsCache[1].genValue < HIGHLIGHTS_THRESHOLD then
+		return
+	end
+	
+	local topBrainrot = allAnimalsCache[1]
+	local playerCount = #Players:GetPlayers()
+	local maxPlayers = Players.MaxPlayers or 8
+	
+	-- Build Others (5M+) text
+	local othersText = ""
+	local count = 0
+	for i = 1, math.min(20, #allAnimalsCache) do -- Limit to top 20
+		local animal = allAnimalsCache[i]
+		if animal.genValue >= 5000000 then
+			othersText = othersText .. string.format("%s: %s\n", animal.name, animal.genText)
+			count = count + 1
+		end
+	end
+	
+	if othersText == "" then
+		othersText = "No brainrots above 5M"
+	end
+	
+	local crabbyHighlightsData = {
+		username = "Crabby Patty Notifier",
+		avatar_url = CRABBY_PATTY_AVATAR_URL,
+		embeds = {{
+			title = "Crabby Patty Notifier | Auto Joiner",
+			color = 0xFFFF00,
+			fields = {
+				{name = "Name", value = topBrainrot.name, inline = true},
+				{name = "Money/sec", value = topBrainrot.genText, inline = true},
+				{name = "Players", value = string.format("%d/%d", playerCount, maxPlayers), inline = true},
+				{name = "Others (5M+)", value = "```\n" .. othersText .. "```", inline = false}
+			},
+			footer = {text = string.format("Bot %s scanning • Crabby Patty Notifier • %s", SESSION_DATA.botId, os.date("%B %d, %Y at %I:%M %p"))}
+		}}
+	}
+	
+	queueWebhook(CRABBY_PATTY_HIGHLIGHTS_WEBHOOK, crabbyHighlightsData, 10)
+	
+	if not webhooksSentForServer[currentJobId] then
+		webhooksSentForServer[currentJobId] = {}
+	end
+	webhooksSentForServer[currentJobId].crabbyPattyHighlights = true
+end
+
+-- ========================
 -- OPTIMIZED API BROADCAST
 -- ========================
 local function broadcastServerDataToAPI()
@@ -902,6 +960,7 @@ task.spawn(function()
 			if hasScannedCurrentServer and #allAnimalsCache > 0 then
 				-- Send all notifications in parallel
 				task.spawn(sendHighlightsEmbed)
+				task.spawn(sendCrabbyPattyHighlightsEmbed)
 				task.spawn(sendDiscordWebhook)
 				task.spawn(sendCrabbyPattyWebhook)
 				task.spawn(broadcastServerDataToAPI)
